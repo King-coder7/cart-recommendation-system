@@ -13,7 +13,6 @@ import argparse
 from collections import defaultdict, Counter
 from pathlib import Path
 from typing import Dict, List, Tuple
-import re
 
 import pandas as pd
 
@@ -21,11 +20,9 @@ import pandas as pd
 def parse_product_list(value: str) -> List[int]:
     """Parse a string like '[227,228]' into [227, 228]."""
     if isinstance(value, str):
-        # Extract numbers from the bracketed list
         value = value.strip()
         if value.startswith('[') and value.endswith(']'):
             value = value[1:-1]
-        # Split on comma and convert to int
         try:
             return [int(x.strip()) for x in value.split(',') if x.strip()]
         except ValueError:
@@ -34,17 +31,18 @@ def parse_product_list(value: str) -> List[int]:
 
 
 def load_cart_history(path: str | Path) -> Dict[int, List[int]]:
-    """Load training data: cart_id -> list of product_ids."""
+    """Load training data: group by cart_session -> list of product_ids."""
     df = pd.read_csv(path)
     
+    # Group by cart_session (which represents a single purchase transaction)
     cart_items: Dict[int, List[int]] = defaultdict(list)
     for _, row in df.iterrows():
-        cart_id = int(row['cart_id'])
+        session = int(row['cart_session'])
         product_id = int(row['cart_product_id'])
-        cart_items[cart_id].append(product_id)
+        cart_items[session].append(product_id)
     
-    # Remove duplicates within each cart, preserve order
-    return {cid: list(dict.fromkeys(products)) for cid, products in cart_items.items()}
+    # Remove duplicates within each session, preserve order
+    return {sid: list(dict.fromkeys(products)) for sid, products in cart_items.items()}
 
 
 def build_co_purchase_model(train_carts: Dict[int, List[int]]) -> Dict[int, Counter]:
@@ -116,7 +114,7 @@ def main() -> None:
     
     print(f"Loading training data from {args.train_data}...")
     train_carts = load_cart_history(args.train_data)
-    print(f"Loaded {len(train_carts)} unique carts with {sum(len(p) for p in train_carts.values())} total product instances")
+    print(f"Loaded {len(train_carts)} unique sessions with {sum(len(p) for p in train_carts.values())} total product instances")
     
     print(f"Building co-purchase model...")
     model = build_co_purchase_model(train_carts)
