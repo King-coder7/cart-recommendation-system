@@ -28,9 +28,11 @@ CART_COLUMNS = [
     "transaction_id",
     "session_id",
     "cart",
+    "cart_session",
 ]
 
 ITEM_COLUMNS = [
+    "cart_product_id",
     "item_id",
     "product_id",
     "product",
