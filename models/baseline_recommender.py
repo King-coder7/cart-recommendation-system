@@ -30,14 +30,14 @@ def parse_product_list(value: str) -> List[int]:
     return []
 
 
-def load_cart_history(path: str | Path) -> Dict[int, List[int]]:
-    """Load training data: group by cart_session -> list of product_ids."""
+def load_cart_history(path: str | Path) -> Dict[str, List[int]]:
+    """Load training data: group by cart_session (string) -> list of product_ids."""
     df = pd.read_csv(path)
     
-    # Group by cart_session (which represents a single purchase transaction)
-    cart_items: Dict[int, List[int]] = defaultdict(list)
+    # Group by cart_session (which is a hash string, represents a single purchase transaction)
+    cart_items: Dict[str, List[int]] = defaultdict(list)
     for _, row in df.iterrows():
-        session = int(row['cart_session'])
+        session = str(row['cart_session']).strip()  # Keep as string
         product_id = int(row['cart_product_id'])
         cart_items[session].append(product_id)
     
@@ -45,7 +45,7 @@ def load_cart_history(path: str | Path) -> Dict[int, List[int]]:
     return {sid: list(dict.fromkeys(products)) for sid, products in cart_items.items()}
 
 
-def build_co_purchase_model(train_carts: Dict[int, List[int]]) -> Dict[int, Counter]:
+def build_co_purchase_model(train_carts: Dict[str, List[int]]) -> Dict[int, Counter]:
     """Build model: product_id -> {related_product: count}."""
     model: Dict[int, Counter] = defaultdict(Counter)
     
