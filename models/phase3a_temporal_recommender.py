@@ -1,23 +1,22 @@
-"""Phase 3A: Temporal Weighting Recommender.
+"""Phase 3a: Temporal-weighted co-purchase recommender.
 
-A stronger baseline than the static co-purchase model described in Phase 1.
-The idea is to keep the same recommendation logic but weight product associations
-by recency so that newer co-purchase patterns matter more than outdated ones.
+Same conditional-probability ranking as Phase 1, but co-purchase counts
+are weighted by recency using exponential decay:
 
-The script is intentionally robust:
-- If the input CSV contains a date/timestamp column, it uses actual recency.
-- If not, it still supports a configurable decay and can infer a reference month
-  from filenames such as cart_export_17_10.csv.
+    weight = 0.5 ** (age_days / half_life_days)
+
+Recent carts contribute more than older ones. An unweighted baseline
+is evaluated in the same run for a direct comparison.
 """
 
 from __future__ import annotations
 
 import argparse
-import re
+import math
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple
 
 import pandas as pd
 
@@ -26,136 +25,85 @@ def parse_product_list(value: str) -> List[int]:
     """Parse a string like '[227,228]' into [227, 228]."""
     if isinstance(value, str):
         value = value.strip()
-        if value.startswith('[') and value.endswith(']'):
+        if value.startswith("[") and value.endswith("]"):
             value = value[1:-1]
         try:
-            return [int(x.strip()) for x in value.split(',') if x.strip()]
+            return [int(x.strip()) for x in value.split(",") if x.strip()]
         except ValueError:
             return []
     return []
 
 
-def infer_reference_date_from_filename(path: str | Path) -> datetime | None:
-    """Infer a likely reference month from filenames like cart_export_17_10.csv."""
-    name = str(Path(path).name)
-    patterns = [
-        r"(\d{4})[-_](\d{1,2})",
-        r"(\d{2})[-_](\d{1,2})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, name)
-        if match:
-            year_part, month_part = match.groups()
-            year = int(year_part)
-            if len(str(year)) == 2:
-                year = 2000 + year if year < 50 else 1900 + year
-            month = int(month_part)
-            if 1 <= month <= 12:
-                return datetime(year, month, 1)
-    return None
+def load_cart_history_with_dates(
+    path: str | Path,
+) -> Tuple[Dict[str, List[int]], Dict[str, datetime]]:
+    """Load carts grouped by session, plus a timestamp per session.
 
-
-def pick_column(df: pd.DataFrame, candidate_names: Iterable[str]) -> str | None:
-    normalized = {str(col).lower(): col for col in df.columns}
-    for name in candidate_names:
-        if name.lower() in normalized:
-            return normalized[name.lower()]
-    return None
-
-
-def parse_datetime(value):
-    if pd.isna(value):
-        return None
-    if isinstance(value, pd.Timestamp):
-        return value.to_pydatetime()
-    if isinstance(value, datetime):
-        return value
-    if not isinstance(value, str):
-        return None
-    value = value.strip()
-    if not value:
-        return None
-    for fmt in [
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
-        "%Y/%m/%d %H:%M:%S",
-        "%Y/%m/%d",
-        "%m/%d/%Y",
-        "%m/%d/%Y %H:%M:%S",
-    ]:
-        try:
-            return datetime.strptime(value, fmt)
-        except ValueError:
-            pass
-    try:
-        return pd.to_datetime(value).to_pydatetime()
-    except Exception:
-        return None
-
-
-def load_cart_history(path: str | Path, reference_date: datetime | None = None) -> tuple[Dict[str, List[int]], Dict[str, datetime]]:
-    """Load sessions and their optional dates.
-
-    Returns a mapping of cart_session -> ordered list of product_ids and a mapping
-    of cart_session -> last-seen datetime for recency weighting.
+    Training files only have year/month, so each session is dated to
+    the latest year-month observed for that cart (day = 1).
     """
     df = pd.read_csv(path)
 
-    session_col = pick_column(df, ["cart_session", "session_id", "cart_id", "session"])
-    product_col = pick_column(df, ["cart_product_id", "product_id", "item_id", "product"])
-    date_col = pick_column(df, ["timestamp", "date", "event_date", "purchase_date", "cart_date", "created_at"])
-
-    if session_col is None or product_col is None:
-        raise ValueError(f"Expected CSV columns like 'cart_session' and 'cart_product_id' in {path}")
-
-    carts: Dict[str, List[int]] = defaultdict(list)
-    session_dates: Dict[str, datetime] = {}
+    cart_items: Dict[str, List[int]] = defaultdict(list)
+    cart_dates: Dict[str, datetime] = {}
 
     for _, row in df.iterrows():
-        session = str(row[session_col]).strip()
-        product = int(row[product_col])
-        carts[session].append(product)
+        session = str(row["cart_session"]).strip()
+        product_id = int(row["cart_product_id"])
+        cart_items[session].append(product_id)
 
-        if date_col is not None:
-            parsed = parse_datetime(row[date_col])
-            if parsed is not None:
-                current = session_dates.get(session)
-                if current is None or parsed > current:
-                    session_dates[session] = parsed
+        year = int(row["year"])
+        month = int(row["month"])
+        dt = datetime(year, month, 1)
+        if session not in cart_dates or dt > cart_dates[session]:
+            cart_dates[session] = dt
 
-    cleaned = {sid: list(dict.fromkeys(products)) for sid, products in carts.items()}
-    return cleaned, session_dates
+    carts = {sid: list(dict.fromkeys(products)) for sid, products in cart_items.items()}
+    return carts, cart_dates
 
 
-def build_temporal_model(
+def parse_iso_date(value: str, flag_name: str) -> datetime:
+    """Parse YYYY-MM-DD, ignoring trailing punctuation from copy-paste."""
+    cleaned = value.strip().rstrip(".,;")
+    try:
+        return datetime.strptime(cleaned, "%Y-%m-%d")
+    except ValueError as exc:
+        raise SystemExit(
+            f"Invalid {flag_name} '{value}'. Use YYYY-MM-DD, e.g. 2016-01-01"
+        ) from exc
+
+
+def recency_weight(age_days: float, half_life_days: float) -> float:
+    """Exponential decay so that weight halves every half_life_days."""
+    if half_life_days <= 0:
+        return 1.0
+    if age_days <= 0:
+        return 1.0
+    return math.pow(0.5, age_days / half_life_days)
+
+
+def build_co_purchase_model(
     train_carts: Dict[str, List[int]],
-    session_dates: Dict[str, datetime],
+    cart_dates: Dict[str, datetime] | None = None,
     reference_date: datetime | None = None,
-    half_life_days: int = 365,
+    half_life_days: float | None = None,
 ) -> Dict[int, Counter]:
-    """Build a recency-weighted co-purchase model.
+    """Build product -> {related_product: weighted_count}.
 
-    If session dates are unavailable, all weights fall back to 1.0 so the model
-    behaves like the Phase 1 baseline while still supporting temporal weighting
-    when data includes dates.
+    If half_life_days is None, every co-purchase counts as 1 (Phase 1).
     """
     model: Dict[int, Counter] = defaultdict(Counter)
-
-    if reference_date is None:
-        # Fall back to the latest observed date, if available; otherwise, use a neutral reference.
-        reference_date = max(session_dates.values()) if session_dates else None
 
     for session_id, products in train_carts.items():
         if len(products) < 2:
             continue
 
-        unique = list(dict.fromkeys(products))
-        session_date = session_dates.get(session_id)
         weight = 1.0
-        if session_date is not None and reference_date is not None:
-            delta_days = max((reference_date - session_date).days, 0)
-            weight = 2 ** (-delta_days / half_life_days)
+        if half_life_days is not None and cart_dates is not None and reference_date is not None:
+            age_days = (reference_date - cart_dates[session_id]).days
+            weight = recency_weight(age_days, half_life_days)
 
+        unique = list(dict.fromkeys(products))
         for product in unique:
             for other in unique:
                 if product != other:
@@ -164,7 +112,12 @@ def build_temporal_model(
     return model
 
 
-def recommend_items(model: Dict[int, Counter], cart_items: List[int], top_k: int = 10) -> List[Tuple[int, float]]:
+def recommend_items(
+    model: Dict[int, Counter],
+    cart_items: List[int],
+    top_k: int = 10,
+) -> List[Tuple[int, float]]:
+    """Recommend top-k items by summed conditional probability."""
     scores: Dict[int, float] = defaultdict(float)
     seen = set(cart_items)
 
@@ -173,6 +126,7 @@ def recommend_items(model: Dict[int, Counter], cart_items: List[int], top_k: int
         total = sum(neighbors.values())
         if total == 0:
             continue
+
         for candidate, count in neighbors.items():
             if candidate not in seen:
                 scores[candidate] += count / total
@@ -182,66 +136,120 @@ def recommend_items(model: Dict[int, Counter], cart_items: List[int], top_k: int
 
 
 def load_answer_file(path: str | Path) -> List[dict]:
+    """Load answer file with previous_products and answer_product_ids."""
     df = pd.read_csv(path)
+
     results = []
     for _, row in df.iterrows():
-        previous = parse_product_list(row['previous_products'])
-        answer = parse_product_list(row['answer_product_ids'])
+        previous = parse_product_list(row["previous_products"])
+        answer = parse_product_list(row["answer_product_ids"])
+
         if previous and answer:
-            results.append({
-                'previous_products': previous,
-                'answer_product_ids': set(answer),
-            })
+            results.append(
+                {
+                    "previous_products": previous,
+                    "answer_product_ids": set(answer),
+                }
+            )
+
     return results
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Phase 3A: Temporal weighting co-purchase recommender.")
-    parser.add_argument("--train-data", type=str, required=True, help="Historical cart transactions CSV")
-    parser.add_argument("--test-data", type=str, required=True, help="Answer/validation CSV")
-    parser.add_argument("--top-k", type=int, default=10, help="Number of recommendations")
-    parser.add_argument("--half-life-days", type=int, default=365, help="Recency half-life in days")
-    parser.add_argument("--reference-date", type=str, default=None, help="Optional date to anchor recency weighting; format YYYY-MM-DD")
-    args = parser.parse_args()
-
-    train_path = Path(args.train_data)
-    test_path = Path(args.test_data)
-
-    inferred_ref = infer_reference_date_from_filename(train_path)
-    ref_date = None
-    if args.reference_date:
-        ref_date = datetime.strptime(args.reference_date, "%Y-%m-%d")
-    elif inferred_ref is not None:
-        ref_date = inferred_ref
-
-    print(f"\n=== Phase 3A: Temporal Weighting Recommender ===\n")
-    print(f"Loading training data from {train_path}...")
-    train_carts, session_dates = load_cart_history(train_path, reference_date=ref_date)
-    print(f"Loaded {len(train_carts)} unique sessions with {sum(len(p) for p in train_carts.values())} total product instances")
-
-    print(f"Building temporal co-purchase model (half-life = {args.half_life_days} days)...")
-    model = build_temporal_model(train_carts, session_dates, reference_date=ref_date, half_life_days=args.half_life_days)
-    print(f"Model contains {len(model)} unique products")
-
-    print(f"Loading answer file from {test_path}...")
-    test_cases = load_answer_file(test_path)
-    print(f"Loaded {len(test_cases)} test cases")
-
+def evaluate(model: Dict[int, Counter], test_cases: List[dict], top_k: int) -> Tuple[int, float]:
     hits = 0
     for test_case in test_cases:
-        previous = test_case['previous_products']
-        answer = test_case['answer_product_ids']
-        recs = recommend_items(model, previous, top_k=args.top_k)
+        recs = recommend_items(model, test_case["previous_products"], top_k=top_k)
         rec_items = {product for product, _ in recs}
-        if rec_items & answer:
+        if rec_items & test_case["answer_product_ids"]:
             hits += 1
 
     hitrate = hits / len(test_cases) if test_cases else 0.0
+    return hits, hitrate
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Phase 3a: train and evaluate a temporally weighted cart recommender."
+    )
+    parser.add_argument("--train-data", type=str, required=True, help="CSV of historical cart purchases")
+    parser.add_argument("--test-data", type=str, required=True, help="CSV of answer / validation carts")
+    parser.add_argument("--top-k", type=int, default=10, help="Number of recommendations to rank")
+    parser.add_argument(
+        "--half-life-days",
+        type=float,
+        default=365,
+        help="Days until a co-purchase is weighted at 50% of a current one",
+    )
+    parser.add_argument(
+        "--reference-date",
+        type=str,
+        default=None,
+        help="YYYY-MM-DD date treated as 'now' for recency (default: latest training month)",
+    )
+    parser.add_argument(
+        "--cutoff-date",
+        type=str,
+        default=None,
+        help="YYYY-MM-DD; drop training sessions on or after this date to avoid leakage",
+    )
+    args = parser.parse_args()
+
+    print("\n=== Phase 3a: Temporal-Weighted Cart Recommender ===\n")
+
+    print(f"Loading training data from {args.train_data}...")
+    train_carts, cart_dates = load_cart_history_with_dates(args.train_data)
+    n_products = sum(len(p) for p in train_carts.values())
+    print(f"Loaded {len(train_carts)} unique sessions with {n_products} total product instances")
+
+    if args.cutoff_date:
+        cutoff = parse_iso_date(args.cutoff_date, "--cutoff-date")
+        keep = [sid for sid, dt in cart_dates.items() if dt < cutoff]
+        dropped = len(train_carts) - len(keep)
+        train_carts = {sid: train_carts[sid] for sid in keep}
+        cart_dates = {sid: cart_dates[sid] for sid in keep}
+        n_products = sum(len(p) for p in train_carts.values())
+        print(
+            f"Applied cutoff {cutoff.date()}: dropped {dropped} future sessions, "
+            f"{len(train_carts)} remain ({n_products} product instances)"
+        )
+
+    if args.reference_date:
+        reference_date = parse_iso_date(args.reference_date, "--reference-date")
+    else:
+        reference_date = max(cart_dates.values()) if cart_dates else datetime.now()
+    min_date = min(cart_dates.values()) if cart_dates else reference_date
+    span_days = (reference_date - min_date).days
+    print(f"Training window: {min_date.date()} → {reference_date.date()} ({span_days} days)")
+    print(f"Decay half-life: {args.half_life_days:.0f} days")
+
+    print("Building unweighted co-purchase model (Phase 1 baseline)...")
+    baseline_model = build_co_purchase_model(train_carts)
+    print(f"Baseline model contains {len(baseline_model)} unique products")
+
+    print("Building temporally weighted co-purchase model...")
+    temporal_model = build_co_purchase_model(
+        train_carts,
+        cart_dates=cart_dates,
+        reference_date=reference_date,
+        half_life_days=args.half_life_days,
+    )
+    print(f"Temporal model contains {len(temporal_model)} unique products")
+
+    print(f"Loading answer file from {args.test_data}...")
+    test_cases = load_answer_file(args.test_data)
+    print(f"Loaded {len(test_cases)} test cases")
+
+    baseline_hits, baseline_hr = evaluate(baseline_model, test_cases, args.top_k)
+    temporal_hits, temporal_hr = evaluate(temporal_model, test_cases, args.top_k)
+    delta = temporal_hr - baseline_hr
+
     print(f"\n=== Results ===")
-    print(f"HitRate@{args.top_k}: {hitrate:.4f} ({hits}/{len(test_cases)})")
-    print(f"Reference date: {ref_date.strftime('%Y-%m-%d') if ref_date else 'not available'}")
-    print(f"Half-life: {args.half_life_days} days")
-    print("\nTemporal weighting keeps the same co-purchase logic, but boosts newer product affinities.")
+    print(f"Baseline  HitRate@{args.top_k}: {baseline_hr:.4f} ({baseline_hits}/{len(test_cases)})")
+    print(
+        f"Temporal  HitRate@{args.top_k}: {temporal_hr:.4f} ({temporal_hits}/{len(test_cases)})  "
+        f"[half-life={args.half_life_days:.0f}d]"
+    )
+    print(f"Delta vs baseline: {delta:+.4f} ({delta * 100:+.2f} pp)\n")
 
 
 if __name__ == "__main__":

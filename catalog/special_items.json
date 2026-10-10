@@ -1,0 +1,25 @@
+{
+  "generated_at": "2019-07-01T00:00:00",
+  "source": "cart_export_19_05.csv",
+  "as_of": "2019-07",
+  "items": [
+    {
+      "product_id": 388,
+      "campaign": "new_arrival",
+      "boost": 1000,
+      "pin_slot": 0
+    },
+    {
+      "product_id": 382,
+      "campaign": "new_arrival",
+      "boost": 1000,
+      "pin_slot": 1
+    },
+    {
+      "product_id": 381,
+      "campaign": "new_arrival",
+      "boost": 1000,
+      "pin_slot": 2
+    }
+  ]
+}
