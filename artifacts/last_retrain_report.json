@@ -1,0 +1,10 @@
+{
+  "trained_at": "2026-10-10T02:07:22Z",
+  "train_data": "data/cart_export_19_05.csv",
+  "holdout": "data/answer_2017-11.csv",
+  "hitrate_at_10": 0.6042,
+  "hits": 1206,
+  "cases": 1996,
+  "new_skus_latest_year": 12,
+  "promoted": true
+}

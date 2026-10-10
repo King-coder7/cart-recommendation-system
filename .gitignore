@@ -21,6 +21,9 @@ Thumbs.db
 # Data outputs
 *.pkl
 *.joblib
+!artifacts/recommender.joblib
+artifacts/*.bak
+artifacts/*.candidate.joblib
 
 # Logs
 *.log
